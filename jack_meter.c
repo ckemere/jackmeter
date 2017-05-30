@@ -248,8 +248,8 @@ void display_scale( int width )
 	}
 	
 	// Print it to screen
-	printf("%s\n", scale);
-	printf("%s\n", line);
+	printf("%s %s\n", scale, scale);
+	printf("%s %s\n", line, line);
 	free(scale);
 	free(line);
 }
@@ -288,6 +288,8 @@ void display_meter( int db, int db2, int width )
 	}
 	
 	for(i=0; i<width-dpeak; i++) { printf(" "); }
+
+	printf(" ");
 
 	for(i=0; i<size2-1; i++) { printf("#"); }
 
@@ -405,7 +407,7 @@ int main(int argc, char *argv[])
 	decay_len2 = (int)(1.6f / (1.0f/rate));
 
 	// Display the scale
-	if (decibels_mode==0) {
+	if ((decibels_mode==0) && (console_width >= 40)) {
 		display_scale( console_width );
 	}
 
