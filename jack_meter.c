@@ -34,12 +34,21 @@
 
 float bias = 1.0f;
 float peak = 0.0f;
+float peak2 = 0.0f;
 
 int dpeak = 0;
 int dtime = 0;
 int decay_len;
+
+int dpeak2 = 0;
+int dtime2 = 0;
+int decay_len2;
+
 char *server_name = NULL;
+
 jack_port_t *input_port = NULL;
+jack_port_t *input_port2 = NULL;
+
 jack_client_t *client = NULL;
 jack_options_t options = JackNoStartServer;
 
@@ -53,6 +62,14 @@ static float read_peak()
 	return tmp;
 }
 
+/* Read and reset the recent peak sample */
+static float read_peak2()
+{
+	float tmp = peak2;
+	peak2 = 0.0f;
+
+	return tmp;
+}
 
 /* Callback called by JACK when audio is available.
    Stores value of peak sample */
@@ -77,6 +94,13 @@ static int process_peak(jack_nframes_t nframes, void *arg)
 		}
 	}
 
+	in = (jack_default_audio_sample_t *) jack_port_get_buffer(input_port2, nframes);
+	for (i = 0; i < nframes; i++) {
+		const float s = fabs(in[i]);
+		if (s > peak2) {
+			peak2 = s;
+		}
+	}
 
 	return 0;
 }
@@ -128,6 +152,15 @@ static void cleanup()
 		}
 	}
 
+	if (input_port2 != NULL ) {
+
+		all_ports = jack_port_get_all_connections(client, input_port2);
+
+		for (i=0; all_ports && all_ports[i]; i++) {
+			jack_disconnect(client, all_ports[i], jack_port_name(input_port2));
+		}
+	}
+
 	/* Leave the jack graph */
 	jack_client_close(client);
 
@@ -135,7 +168,7 @@ static void cleanup()
 
 
 /* Connect the chosen port to ours */
-static void connect_port(jack_client_t *client, char *port_name)
+static void connect_port(jack_client_t *client, char *port_name, jack_port_t *input_p)
 {
 	jack_port_t *port;
 
@@ -147,9 +180,9 @@ static void connect_port(jack_client_t *client, char *port_name)
 	}
 
 	// Connect the port to our input port
-	fprintf(stderr,"Connecting '%s' to '%s'...\n", jack_port_name(port), jack_port_name(input_port));
-	if (jack_connect(client, jack_port_name(port), jack_port_name(input_port))) {
-		fprintf(stderr, "Cannot connect port '%s' to '%s'\n", jack_port_name(port), jack_port_name(input_port));
+	fprintf(stderr,"Connecting '%s' to '%s'...\n", jack_port_name(port), jack_port_name(input_p));
+	if (jack_connect(client, jack_port_name(port), jack_port_name(input_p))) {
+		fprintf(stderr, "Cannot connect port '%s' to '%s'\n", jack_port_name(port), jack_port_name(input_p));
 		exit(1);
 	}
 }
@@ -222,9 +255,10 @@ void display_scale( int width )
 }
 
 
-void display_meter( int db, int width )
+void display_meter( int db, int db2, int width )
 {
 	int size = iec_scale( db, width );
+	int size2 = iec_scale( db2, width );
 	int i;
 	
 	if (size > dpeak) {
@@ -234,6 +268,13 @@ void display_meter( int db, int width )
 		dpeak = size;
 	}
 	
+	if (size > dpeak2) {
+		dpeak2 = size2;
+		dtime2 = 0;
+	} else if (dtime2++ > decay_len2) {
+		dpeak2 = size2;
+	}
+
 	printf("\r");
 	
 	for(i=0; i<size-1; i++) { printf("#"); }
@@ -247,6 +288,18 @@ void display_meter( int db, int width )
 	}
 	
 	for(i=0; i<width-dpeak; i++) { printf(" "); }
+
+	for(i=0; i<size2-1; i++) { printf("#"); }
+
+	if (dpeak2==size2) {
+		printf("I");
+	} else {
+		printf("#");
+		for(i=0; i<dpeak2-size2-1; i++) { printf(" "); }
+		printf("I");
+	}
+
+	for(i=0; i<width-dpeak2; i++) { printf(" "); }
 }
 
 
@@ -304,9 +357,13 @@ int main(int argc, char *argv[])
 	}
 	fprintf(stderr,"Registering as '%s'.\n", jack_get_client_name( client ) );
 
-	// Create our input port
-	if (!(input_port = jack_port_register(client, "in", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0))) {
+	// Create our input ports
+	if (!(input_port = jack_port_register(client, "in_0", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0))) {
 		fprintf(stderr, "Cannot register input port 'meter'.\n");
+		exit(1);
+	}
+	if (!(input_port2 = jack_port_register(client, "in_1", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 1))) {
+		fprintf(stderr, "Cannot register second input port 'meter'.\n");
 		exit(1);
 	}
 	
@@ -322,11 +379,20 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
+	int port = 0;
 
 	// Connect our port to specified port(s)
 	if (argc > optind) {
 		while (argc > optind) {
-			connect_port( client, argv[ optind ] );
+			if (port < 1) {
+				connect_port( client, argv[ optind ] , input_port);
+				++port;
+			} else if (port < 2) {
+				connect_port( client, argv[ optind ] , input_port2);
+				++port;
+			} else {
+				fprintf(stderr, "No more free input port.\n");
+			}
 			optind++;
 		}
 	} else {
@@ -335,7 +401,8 @@ int main(int argc, char *argv[])
 
 	// Calculate the decay length (should be 1600ms)
 	decay_len = (int)(1.6f / (1.0f/rate));
-	
+
+	decay_len2 = (int)(1.6f / (1.0f/rate));
 
 	// Display the scale
 	if (decibels_mode==0) {
@@ -344,11 +411,12 @@ int main(int argc, char *argv[])
 
 	while (running) {
 		float db = 20.0f * log10f(read_peak() * bias);
+		float db2 = 20.0f * log10f(read_peak2() * bias);
 		
 		if (decibels_mode==1) {
-			printf("%1.1f\n", db);
+			printf("%1.1f %1.1f\n", db, db2);
 		} else {
-			display_meter( db, console_width );
+			display_meter( db, db2, console_width );
 		}
 		
 		fsleep( 1.0f/rate );
